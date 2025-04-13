@@ -1,0 +1,10 @@
+python-dotenv
+langchain-community
+langchain-google-genai
+langchain-core
+langchain
+faiss-cpu
+pypdf
+flask
+google-generativeai
+jina-embeddings
