@@ -11,7 +11,6 @@ from langchain_core.runnables import RunnableLambda
 from flask import Flask, request, jsonify
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import csv
-from sentence_transformers import SentenceTransformer
 app = Flask(__name__)
 api_len = 10 
 def setup_environment():
@@ -19,7 +18,7 @@ def setup_environment():
     load_dotenv()
 def initialize_models(model_name):
     """Initialize embeddings and language model."""
-    EMBEDDING_MODEL_NAME = "Bo8dady/finetuned2-College-embeddings"  
+    EMBEDDING_MODEL_NAME = "Bo8dady/finetuned4-College-embeddings"  
 
     embeddings = HuggingFaceEmbeddings(
                  model_name=EMBEDDING_MODEL_NAME,
@@ -64,14 +63,11 @@ def setup_retriever(faiss_index , num_retrievs=10):
 def initialize_prompt_templates():
     """Define and return prompt templates for question answering and refinement."""
     qa_template = ChatPromptTemplate.from_messages([
-        ("system", """Answer the question based on the context below and make the answer very organized and have markup. If you can't answer, say 'I don’t know.
-         
-         note  : answer in the laguage of the orginal question
+        ("system", """Answer the question based on the context below and make the answer very organized and have markup . 
            Context: {context}
            Question: {question}
-           orignal question : {orginal_question}
         """),
-        ("human", "question: {question}\ncontext: {context}")
+        ("human", "question: {question}\n context: {context}"),
     ])
 
     refine_template = ChatPromptTemplate.from_messages([
@@ -96,9 +92,7 @@ def get_answer(question):
             refined_question = chain_question_refine.invoke({"question": question})
             context = chain_retrieve_docs.invoke(refined_question)
             print(refined_question)
-            answer = chain_answer_question.invoke({"question": refined_question, "context": context ,  "orginal_question": question})  
-            print("Answer generated successfully.")
-            
+            answer = chain_answer_question.invoke({"question": refined_question, "context": context})  
             return answer
         except Exception as e:
             print(f"Error generating answer: {e}")
@@ -111,9 +105,8 @@ def chatbot():
     print("Question received:", question)
     # Process the question (this is where your logic goes)
     answer = get_answer(question)
-    
     # Return the answer as JSON
-    return jsonify({'answer': answer})    
+    return jsonify({'answer': answer})         
 if __name__ == "__main__":
     data_path = "chunks.csv"
     index_folder = "faiss_index"
