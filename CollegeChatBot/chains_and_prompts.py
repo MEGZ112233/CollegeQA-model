@@ -2,7 +2,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda , RunnableParallel
 from langchain.schema import StrOutputParser
 from operator import itemgetter
-def initialize_prompt_templates():
+class Templates : 
     """Define and return prompt templates for question answering and refinement."""
     qa_template = ChatPromptTemplate.from_messages([
         ("system", """ 
@@ -27,25 +27,31 @@ def initialize_prompt_templates():
             important information:
             """
     ])
-    return qa_template, refine_template ,summarize_template
-def get_single(summarize_doc   , model ): 
-     return {
-         "document": itemgetter("document") , 
-         "question": itemgetter("question")
-     } |  summarize_doc | model | StrOutputParser()
 
-def get_chains(qa_template, refine_template, summarize_template , models, idx):
+    async def get_single(model, question, doc):
+        """Get a single output from the model using the document and question."""
+        # Step 1: Apply the prompt template
+        input_dict = {
+            "document": doc.page_content,
+            "question": question
+        }
+        
+        # Step 2: Apply the prompt template
+        prompt = Templates.summarize_template
+        formatted_prompt = await prompt.ainvoke(input_dict)
+        
+        # Step 3: Run the model with the formatted prompt
+        model_output = await model.ainvoke(formatted_prompt)
+        
+        # Step 4: Parse the output to string
+        output_parser = StrOutputParser()
+        final_output = await output_parser.ainvoke(model_output)
+        
+        return final_output
+
+def get_chains(models, idx):
     """Build LangChain pipelines for question refinement, retrieval, and answering."""
-    chain_question_refine = refine_template | models[idx] | StrOutputParser()
-    chain_answer_question = qa_template | models[idx] | StrOutputParser()
-    def prepare_inputs(i):
-        return RunnableLambda(lambda x: {
-            "document": x["docs"][i].page_content,
-            "question": x["question"]
-        }) 
-    distributed_chain = RunnableParallel({
-        f"doc_{i}": prepare_inputs(i) |get_single(summarize_template, models[i])
-        for i in range(5)
-    })
+    chain_question_refine = Templates.refine_template | models[idx] | StrOutputParser()
+    chain_answer_question = Templates.qa_template | models[idx] | StrOutputParser()
 
-    return chain_question_refine , chain_answer_question , distributed_chain
+    return chain_question_refine , chain_answer_question 
