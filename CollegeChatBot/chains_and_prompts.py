@@ -1,14 +1,17 @@
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnableParallel
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnableLambda, RunnableParallel, RunnablePassthrough
 from langchain.schema import StrOutputParser
+from operator import itemgetter
 
 
 class Templates:
     """Define and return prompt templates for question answering and refinement."""
     qa_template = ChatPromptTemplate.from_messages([
         ("system", """ 
-           you will be given  question and context and you must understand the context and the question and answer based on the context in natural language.  
+            You will be given a question and context, and you must understand the context and the question to answer in natural language.
+           If the conversation history is available, use it to understand follow-up questions.  
         """),
+        MessagesPlaceholder(variable_name="chat_history"),
         ("human", "question: {question}\n context: {context}"),
     ])
 
@@ -27,7 +30,8 @@ class Templates:
         4. Rules: Contains official college regulations, academic rules, course prerequisites, and program structures.
         You will be given:
         1. The User's Question.
-        2. A Sample Snippet from each of the four data sources to help you understand the type of information each contains.
+        2. the chat history . 
+        3. A Sample Snippet from each of the four data sources to help you understand the type of information each contains.
         Your goal is to output a Python list of 4 integers. Each integer represents the estimated number of relevant documents that should be retrieved from the corresponding data source to answer the question. The order in the list MUST match the order of the data sources listed above: [number_for_Abstracts, number_for_Emails, number_for_Finals, number_for_Rules]
         Guidelines for determining the number of documents:
         * Relevance is Key: If a data source is highly relevant and likely to contain the core answer, suggest 1-3 documents. For broader queries requiring exploration (e.g., "find projects about AI"), you might suggest up to 10 from 'Abstracts'.
@@ -56,6 +60,8 @@ class Templates:
             * Expected Output Reasoning: Needs 'Rules' for plagiarism and 'Emails' for the department head.
             * Expected Output: [0, 1, 0, 1] 
         """),
+        MessagesPlaceholder(variable_name="chat_history")
+        ,
         ("human", """
                 Now, analyze the following:
         User's Question:
@@ -100,9 +106,19 @@ class Templates:
     ])
 
 
-def get_chains(models, idx):
+def get_chains(models, idx, memory):
     """Build LangChain pipelines for question refinement, retrieval, and answering."""
     chain_question_refine = Templates.refine_template | models[idx] | StrOutputParser()
-    chain_answer_question = Templates.qa_template | models[idx] | StrOutputParser()
-    chain_cluster_question = Templates.cluster_template | models[idx] | StrOutputParser()
+    chain_answer_question = (
+            RunnablePassthrough.assign(
+                chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("chat_history")
+            )
+            | Templates.qa_template | models[idx] | StrOutputParser()
+    )
+    chain_cluster_question = (
+            RunnablePassthrough.assign(
+                chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("chat_history")
+            )
+            | Templates.cluster_template | models[idx] | StrOutputParser()
+    )
     return chain_question_refine, chain_answer_question, chain_cluster_question

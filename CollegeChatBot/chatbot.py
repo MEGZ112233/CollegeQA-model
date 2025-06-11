@@ -1,3 +1,5 @@
+from langchain.memory import ConversationBufferWindowMemory
+
 from chains_and_prompts import get_chains
 from utils import *
 from langchain_core.runnables import RunnableLambda, RunnableParallel
@@ -7,13 +9,14 @@ import asyncio
 api_len = 10
 
 
-async def get_answer(question, models, faiss_indexes):
+async def get_answer(question, models, faiss_indexes , memory):
     idx = 0
 
     try:
         idx += 1
         idx %= api_len
-        _, answer_chain, cluster = get_chains(models, idx)
+
+        _, answer_chain, cluster = get_chains(models, idx, memory)
         output = await cluster.ainvoke({"question": question})
         output = parse_list(output)
         print(output)

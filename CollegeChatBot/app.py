@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from langchain.memory import ConversationBufferWindowMemory
 from pydantic import BaseModel
 from config import setup_environment
 from models import initialize_models
@@ -13,6 +14,7 @@ app = FastAPI()
 # Global variables
 retriever = None
 models = None
+memory = ConversationBufferWindowMemory(k=4, memory_key="chat_history", return_messages=True)
 faiss_indexes = {}
 
 # Define the request model
@@ -51,10 +53,12 @@ async def startup_event():
 
 @app.get("/ModularChatBot")
 async def chatbot_api(payload: QuestionInput):
-    global retriever, models
+    global retriever, models , memory
     question = payload.question
     print("Received:", question)
-    answer = await get_answer(question, models, faiss_indexes)
+    answer = await get_answer(question, models, faiss_indexes , memory)
+    memory.save_context({"question": question}, {"answer": answer})
+    print(memory)
     return {"answer": answer}
 
 
