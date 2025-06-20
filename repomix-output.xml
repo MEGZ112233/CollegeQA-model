@@ -62,238 +62,6 @@ requirements.txt
 <files>
 This section contains the contents of the repository's files.
 
-<file path="CollegeChatBot/app.py">
-from fastapi import FastAPI
-from pydantic import BaseModel
-from config import setup_environment
-from models import initialize_models
-from utils import upload_chunks
-from faiss_handler import manage_faiss_index
-from chatbot import get_answer
-import os
-import uvicorn
-
-app = FastAPI()
-
-# Global variables
-retriever = None
-models = None
-faiss_indexes = {}
-
-# Define the request model
-class QuestionInput(BaseModel):
-    question: str
-
-
-@app.on_event("startup")
-async def startup_event():
-    global retriever, models , faiss_indexes
-    print("🔧 Initializing environment and models...")
-    setup_environment()
-    embeddings, models = initialize_models("gemini-2.0-flash")
-    data_sources_config = {
-        "abstracts": {"file": "abstracts.csv", "index_folder": "faiss_abstracts"},
-        "emails": {"file": "emails.csv", "index_folder": "faiss_emails"},
-        "finals": {"file": "finals.csv", "index_folder": "faiss_finals"},
-        "rules": {"file": "rules.csv", "index_folder": "faiss_rules"},
-    }
-    base_dir = os.path.dirname(os.path.dirname(__file__))
-    for db_name, config in data_sources_config.items():
-        data_path = os.path.join(base_dir, "data", config["file"])
-        index_folder_path = os.path.join(base_dir, config["index_folder"])
-        chunks = upload_chunks(data_path)
-        faiss_index = manage_faiss_index(chunks, embeddings, index_folder_path)
-        faiss_indexes[db_name] = faiss_index
-
-
-    chunk_path = os.path.join(base_dir, "merged.csv")
-    chunks = upload_chunks(chunk_path)
-
-    faiss_index = manage_faiss_index(chunks, embeddings, "faiss_index")
-    retriever = faiss_index.as_retriever(search_kwargs={"k": 5})
-    print("✅ Startup complete.")
-
-
-@app.get("/ModularChatBot")
-async def chatbot_api(payload: QuestionInput):
-    global retriever, models
-    question = payload.question
-    print("Received:", question)
-    answer = await get_answer(question, models, faiss_indexes)
-    return {"answer": answer}
-
-
-if __name__ == "__main__":
-    # Run using uvicorn from this file directly
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
-</file>
-
-<file path="CollegeChatBot/chains_and_prompts.py">
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnableParallel
-from langchain.schema import StrOutputParser
-
-
-class Templates:
-    """Define and return prompt templates for question answering and refinement."""
-    qa_template = ChatPromptTemplate.from_messages([
-        ("system", """ 
-           you will be given  question and context and you must understand the context and the question and answer based on the context in natural language.  
-        """),
-        ("human", "question: {question}\n context: {context}"),
-    ])
-
-    refine_template = ChatPromptTemplate.from_messages([
-        ("system",
-         "Rephrase the student's question for clarity while preserving its meaning and if there something mispealing correct it. Make sure the output is in English and only one question."),
-        ("human", "Question to refine: {question}")
-    ])
-
-    cluster_template = ChatPromptTemplate.from_messages([
-        ("system", """ You are an intelligent query analysis assistant for a college information system. Your primary task is to determine the optimal number of documents to retrieve from each of four distinct data sources to best answer a student's question.
-        The four data sources are, in this specific order:
-        1. Abstracts: Contains summaries and details of student graduation projects and research.
-        2. Emails: Contains contact information (email addresses, departments) for college doctors and staff.
-        3. Finals: Contains links to past final exam papers for various courses.
-        4. Rules: Contains official college regulations, academic rules, course prerequisites, and program structures.
-        You will be given:
-        1. The User's Question.
-        2. A Sample Snippet from each of the four data sources to help you understand the type of information each contains.
-        Your goal is to output a Python list of 4 integers. Each integer represents the estimated number of relevant documents that should be retrieved from the corresponding data source to answer the question. The order in the list MUST match the order of the data sources listed above: [number_for_Abstracts, number_for_Emails, number_for_Finals, number_for_Rules]
-        Guidelines for determining the number of documents:
-        * Relevance is Key: If a data source is highly relevant and likely to contain the core answer, suggest 1-3 documents. For broader queries requiring exploration (e.g., "find projects about AI"), you might suggest up to 10 from 'Abstracts'.
-        * Specificity:
-            * 
-            * If the question asks for a single piece of specific information (e.g., "email of Dr. Smith"), 1 or 2  document from the 'Emails' source is likely sufficient.
-            * If the question asks about multiple specific items (e.g., "final exams for CS101 for 2020, 2021, and 2022"), you might suggest 1-3 documents from 'Finals', assuming each year/course might be a separate document or closely related ones.
-        * Irrelevance: If a data source is clearly irrelevant to the question, use 0 for that source.
-        * Conciseness: Prefer fewer documents if the answer is likely to be found in a small number of highly relevant chunks. Avoid requesting many documents unnecessarily.
-        * No Information: If you believe none of the data sources can answer the question, you can output [0, 0, 0, 0].
-        Example Scenarios:
-        * Question: "What is Dr. Eman Hamdi's email address?"
-            * 
-            * Expected Output Reasoning: This is a direct request for an email. 'Emails' is the only relevant source.
-            * Expected Output: [0, 1, 0, 0]
-        * Question: "Can you show me some graduation project abstracts on machine learning?"
-            * 
-            * Expected Output Reasoning: This is about project abstracts. 'Abstracts' is primary. A few examples would be good.
-            * Expected Output: [3, 0, 0, 0] (Suggesting 3 abstracts)
-        * Question: "Where can I find the final exam for Algorithms from 2021 and what are the prerequisites for the advanced algorithms course?"
-            * 
-            * Expected Output Reasoning: Needs 'Finals' for the exam link and 'Rules' for course prerequisites.
-            * Expected Output: [0, 0, 1, 1] (or [0, 0, 1, 2] if prerequisites are complex and might span multiple rule chunks)
-        * Question: "What are the college's rules regarding plagiarism and what's the email for the head of the CS department?"
-            * 
-            * Expected Output Reasoning: Needs 'Rules' for plagiarism and 'Emails' for the department head.
-            * Expected Output: [0, 1, 0, 1] 
-        """),
-        ("human", """
-                Now, analyze the following:
-        User's Question:
-              {question}
-            
-        Data Source Samples:
-        1. Sample from 'Abstracts' Data Source:
-              **Faculty Information**
-        
-        Faculty of Computer Science and Information
-        Scientific Computing Department
-        
-        **Abstract**
-        
-        During the last few decades, with the rise of Youtube, Amazon, Netflix and many other such web services, recommender systems have taken more and more place in our lives. From e-commerce (suggest to buyers articles that could interest them) to online advertisement (suggest to users the right contents, matching their preferences), recommender systems are today unavoidable in our daily online journeys.
-        
-        **Recommender Systems as Algorithms**
-        
-        In a very general way, recommender systems are algorithms aimed at suggesting relevant items to users (items being movies to watch, text to read, products to buy or anything else depending on industries).
-            
-        2. Sample from 'Emails' Data Source:
-              Dr. Eman Hamdi is part of the Unknown department and can be reached at emanhamdi@cis.asu.edu.eg.
-        3. Sample from 'Finals' Data Source:
-              The final exam for Algorithms Analysis & Design course, offered by the scientific computing department, from 2021, is available at the following link: [https://drive.google.com/file/d/1mT21jrptv4w2IdFd5G-oVxI_6lR_SrS9/view
-        The final exam for Algorithms Analysis & Design course, offered by the scientific computing department, from 2020, is available at the following link: [https://drive.google.com/file/d/1W_X01ASI0yyo6fCG4SwZYlvoE-Sh_C0g/view?usp=drive_link
-        4. Sample from 'Rules' Data Source:
-              Topic: Scientific Computing Fourth Level Courses
-        Summary: Outlines the courses, credit hours, and prerequisites for the seventh and eighth semesters of the fourth level Scientific Computing program.
-        Chunk: ""Fourth Level Courses For Scientific Computing (SC4) 
-        Seventh Semester  
-        • SCO422: Computational Geometry (3 Credit Hours) – Prerequisite: SCO311 (Computer 
-        Graphics) 
-        • SCO411: Neural Networks & Deep Learning (3 Credit Hours) – Prerequisite: BSC225 (Linear 
-        Algebra) 
-        • SCO421: Computer Vision (3 Credit Hours) – Prerequisite: CIS243 (Artificial Intelligence) 
-        • Total Credit Hours: 18 
-        Eighth Semester 
-        • CSY410: Computer and Network Security (3 Credit Hours) – Prerequisite: CIS365
-            
-        Your Output (Python list of 4 integers only):
-                """)
-    ])
-
-
-def get_chains(models, idx):
-    """Build LangChain pipelines for question refinement, retrieval, and answering."""
-    chain_question_refine = Templates.refine_template | models[idx] | StrOutputParser()
-    chain_answer_question = Templates.qa_template | models[idx] | StrOutputParser()
-    chain_cluster_question = Templates.cluster_template | models[idx] | StrOutputParser()
-    return chain_question_refine, chain_answer_question, chain_cluster_question
-</file>
-
-<file path="CollegeChatBot/chatbot.py">
-from chains_and_prompts import get_chains
-from utils import *
-from langchain_core.runnables import RunnableLambda, RunnableParallel
-from chains_and_prompts import Templates
-import asyncio
-
-api_len = 10
-
-
-async def get_answer(question, models, faiss_indexes):
-    idx = 0
-
-    try:
-        idx += 1
-        idx %= api_len
-        _, answer_chain, cluster = get_chains(models, idx)
-        output = await cluster.ainvoke({"question": question})
-        output = parse_list(output)
-        print(output)
-        db_names = ["abstracts", "emails", "finals", "rules"]
-        retrieved_docs = []
-        retrieved_tasks = []
-        for i, counter in enumerate(output):
-            if counter > 0:
-                faiss_index = faiss_indexes.get(db_names[i])
-
-                if faiss_index:
-                    dynamic_retriever = faiss_index.as_retriever(search_kwargs={"k": counter})
-                    retrieved_tasks.append(dynamic_retriever.ainvoke(question))
-                else:
-                    print(f"  Warning: FAISS index for '{db_names[i]}' not found in global 'faiss_indexes'.")
-
-        retrieved_docs_list = await asyncio.gather(*retrieved_tasks)
-        for docs_from_db in retrieved_docs_list:
-            for doc in docs_from_db:
-                retrieved_docs.append(doc.page_content)
-        context = "\n\n".join(retrieved_docs)
-        try:
-            idx += 1
-            idx %= len(models)
-            answer = await answer_chain.ainvoke({"question": question, "context": context})
-            return answer
-        except Exception as e:
-            print(f"Error during final answer generation (LLM index {idx}): {e}")
-            # Try next LLM or return an error message
-            return "I apologize, but I encountered an error while generating the answer. Please try again later."
-
-
-
-
-    except Exception as e:
-        print(f"Error at index {idx}: {e}")
-</file>
-
 <file path="CollegeChatBot/config.py">
 import os
 from dotenv import load_dotenv
@@ -1072,6 +840,291 @@ fastapi
 uvicorn
 pydantic
 pandas
+</file>
+
+<file path="CollegeChatBot/app.py">
+from fastapi import FastAPI
+from langchain.memory import ConversationBufferWindowMemory
+from pydantic import BaseModel
+from config import setup_environment
+from models import initialize_models
+from utils import upload_chunks
+from faiss_handler import manage_faiss_index
+from chatbot import get_answer
+import os
+import uvicorn
+import uuid
+from langchain_community.chat_message_histories import RedisChatMessageHistory
+
+
+app = FastAPI()
+
+# Global variables
+retriever = None
+models = None
+REDIS_URL  =None
+memory = ConversationBufferWindowMemory(k=4, memory_key="chat_history", return_messages=True)
+faiss_indexes = {}
+
+# Define the request model
+class QuestionInput(BaseModel):
+    question: str
+
+
+@app.on_event("startup")
+async def startup_event():
+    global retriever, models , faiss_indexes ,  REDIS_URL
+    print("🔧 Initializing environment and models...")
+    setup_environment()
+    REDIS_URL = os.getenv("REDIS_URL")
+    embeddings, models = initialize_models("gemini-2.5-flash-preview-05-20")
+    data_sources_config = {
+        "abstracts": {"file": "abstracts.csv", "index_folder": "faiss_abstracts"},
+        "emails": {"file": "emails.csv", "index_folder": "faiss_emails"},
+        "finals": {"file": "finals.csv", "index_folder": "faiss_finals"},
+        "rules": {"file": "rules.csv", "index_folder": "faiss_rules"},
+    }
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    for db_name, config in data_sources_config.items():
+        data_path = os.path.join(base_dir, "data", config["file"])
+        index_folder_path = os.path.join(base_dir, config["index_folder"])
+        chunks = upload_chunks(data_path)
+        faiss_index = manage_faiss_index(chunks, embeddings, index_folder_path)
+        faiss_indexes[db_name] = faiss_index
+
+
+    chunk_path = os.path.join(base_dir, "merged.csv")
+    chunks = upload_chunks(chunk_path)
+    try:
+        from redis import Redis
+        r = Redis.from_url(REDIS_URL)
+        await r.ping()
+        print("✅ Successfully connected to Redis.")
+    except Exception as e:
+        print(f"❌ Could not connect to Redis at {REDIS_URL}: {e}")
+        exit(1)
+
+    faiss_index = manage_faiss_index(chunks, embeddings, "faiss_index")
+    retriever = faiss_index.as_retriever(search_kwargs={"k": 5})
+    print("✅ Startup complete.")
+
+
+@app.get("/ModularChatBot")
+async def chatbot_api(payload: QuestionInput):
+    global retriever, models , memory
+    question = payload.question
+    session_id = payload.session_id
+
+    if not session_id:
+        session_id = uuid.uuid4()
+        print(f" NEW SESSION ID: {session_id}")
+
+    message_history = RedisChatMessageHistory(
+        session_id=session_id,
+        url = os.getenv("REDIS_URL")
+    )
+
+    current_session_memory = ConversationBufferWindowMemory(
+        k=4,
+        memory_key="chat_history",
+        chat_memory=message_history,
+        return_messages=True
+    )
+    print("Received:", question)
+    answer = await get_answer(question, models, faiss_indexes , memory)
+    memory.save_context({"question": question}, {"answer": answer})
+    print(memory)
+    return {"session_id": session_id, "answer": answer}
+
+
+if __name__ == "__main__":
+    # Run using uvicorn from this file directly
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+</file>
+
+<file path="CollegeChatBot/chains_and_prompts.py">
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnableLambda, RunnableParallel, RunnablePassthrough
+from langchain.schema import StrOutputParser
+from operator import itemgetter
+
+
+class Templates:
+    """Define and return prompt templates for question answering and refinement."""
+    qa_template = ChatPromptTemplate.from_messages([
+        ("system", """ 
+            You will be given a question and context, and you must understand the context and the question to answer in natural language.
+           If the conversation history is available, use it to understand follow-up questions.  
+        """),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "question: {question}\n context: {context}"),
+    ])
+
+    refine_template = ChatPromptTemplate.from_messages([
+        ("system",
+         "Rephrase the student's question for clarity while preserving its meaning and if there something mispealing correct it. Make sure the output is in English and only one question."),
+        ("human", "Question to refine: {question}")
+    ])
+
+    cluster_template = ChatPromptTemplate.from_messages([
+        ("system", """ You are an intelligent query analysis assistant for a college information system. Your primary task is to determine the optimal number of documents to retrieve from each of four distinct data sources to best answer a student's question.
+        The four data sources are, in this specific order:
+        1. Abstracts: Contains summaries and details of student graduation projects and research.
+        2. Emails: Contains contact information (email addresses, departments) for college doctors and staff.
+        3. Finals: Contains links to past final exam papers for various courses.
+        4. Rules: Contains official college regulations, academic rules, course prerequisites, and program structures.
+        You will be given:
+        1. The User's Question.
+        2. the chat history . 
+        3. A Sample Snippet from each of the four data sources to help you understand the type of information each contains.
+        Your goal is to output a Python list of 4 integers. Each integer represents the estimated number of relevant documents that should be retrieved from the corresponding data source to answer the question. The order in the list MUST match the order of the data sources listed above: [number_for_Abstracts, number_for_Emails, number_for_Finals, number_for_Rules]
+        Guidelines for determining the number of documents:
+        * Relevance is Key: If a data source is highly relevant and likely to contain the core answer, suggest 1-3 documents. For broader queries requiring exploration (e.g., "find projects about AI"), you might suggest up to 10 from 'Abstracts'.
+        * Specificity:
+            * 
+            * If the question asks for a single piece of specific information (e.g., "email of Dr. Smith"), 1 or 2  document from the 'Emails' source is likely sufficient.
+            * If the question asks about multiple specific items (e.g., "final exams for CS101 for 2020, 2021, and 2022"), you might suggest 1-3 documents from 'Finals', assuming each year/course might be a separate document or closely related ones.
+        * Irrelevance: If a data source is clearly irrelevant to the question, use 0 for that source.
+        * Conciseness: Prefer fewer documents if the answer is likely to be found in a small number of highly relevant chunks. Avoid requesting many documents unnecessarily.
+        * No Information: If you believe none of the data sources can answer the question, you can output [0, 0, 0, 0].
+        Example Scenarios:
+        * Question: "What is Dr. Eman Hamdi's email address?"
+            * 
+            * Expected Output Reasoning: This is a direct request for an email. 'Emails' is the only relevant source.
+            * Expected Output: [0, 1, 0, 0]
+        * Question: "Can you show me some graduation project abstracts on machine learning?"
+            * 
+            * Expected Output Reasoning: This is about project abstracts. 'Abstracts' is primary. A few examples would be good.
+            * Expected Output: [3, 0, 0, 0] (Suggesting 3 abstracts)
+        * Question: "Where can I find the final exam for Algorithms from 2021 and what are the prerequisites for the advanced algorithms course?"
+            * 
+            * Expected Output Reasoning: Needs 'Finals' for the exam link and 'Rules' for course prerequisites.
+            * Expected Output: [0, 0, 1, 1] (or [0, 0, 1, 2] if prerequisites are complex and might span multiple rule chunks)
+        * Question: "What are the college's rules regarding plagiarism and what's the email for the head of the CS department?"
+            * 
+            * Expected Output Reasoning: Needs 'Rules' for plagiarism and 'Emails' for the department head.
+            * Expected Output: [0, 1, 0, 1] 
+        """),
+        MessagesPlaceholder(variable_name="chat_history")
+        ,
+        ("human", """
+                Now, analyze the following:
+        User's Question:
+              {question}
+            
+        Data Source Samples:
+        1. Sample from 'Abstracts' Data Source:
+              **Faculty Information**
+        
+        Faculty of Computer Science and Information
+        Scientific Computing Department
+        
+        **Abstract**
+        
+        During the last few decades, with the rise of Youtube, Amazon, Netflix and many other such web services, recommender systems have taken more and more place in our lives. From e-commerce (suggest to buyers articles that could interest them) to online advertisement (suggest to users the right contents, matching their preferences), recommender systems are today unavoidable in our daily online journeys.
+        
+        **Recommender Systems as Algorithms**
+        
+        In a very general way, recommender systems are algorithms aimed at suggesting relevant items to users (items being movies to watch, text to read, products to buy or anything else depending on industries).
+            
+        2. Sample from 'Emails' Data Source:
+              Dr. Eman Hamdi is part of the Unknown department and can be reached at emanhamdi@cis.asu.edu.eg.
+        3. Sample from 'Finals' Data Source:
+              The final exam for Algorithms Analysis & Design course, offered by the scientific computing department, from 2021, is available at the following link: [https://drive.google.com/file/d/1mT21jrptv4w2IdFd5G-oVxI_6lR_SrS9/view
+        The final exam for Algorithms Analysis & Design course, offered by the scientific computing department, from 2020, is available at the following link: [https://drive.google.com/file/d/1W_X01ASI0yyo6fCG4SwZYlvoE-Sh_C0g/view?usp=drive_link
+        4. Sample from 'Rules' Data Source:
+              Topic: Scientific Computing Fourth Level Courses
+        Summary: Outlines the courses, credit hours, and prerequisites for the seventh and eighth semesters of the fourth level Scientific Computing program.
+        Chunk: ""Fourth Level Courses For Scientific Computing (SC4) 
+        Seventh Semester  
+        • SCO422: Computational Geometry (3 Credit Hours) – Prerequisite: SCO311 (Computer 
+        Graphics) 
+        • SCO411: Neural Networks & Deep Learning (3 Credit Hours) – Prerequisite: BSC225 (Linear 
+        Algebra) 
+        • SCO421: Computer Vision (3 Credit Hours) – Prerequisite: CIS243 (Artificial Intelligence) 
+        • Total Credit Hours: 18 
+        Eighth Semester 
+        • CSY410: Computer and Network Security (3 Credit Hours) – Prerequisite: CIS365
+            
+        Your Output (Python list of 4 integers only):
+                """)
+    ])
+
+
+def get_chains(models, idx, memory):
+    """Build LangChain pipelines for question refinement, retrieval, and answering."""
+    chain_question_refine = Templates.refine_template | models[idx] | StrOutputParser()
+    chain_answer_question = (
+            RunnablePassthrough.assign(
+                chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("chat_history")
+            )
+            | Templates.qa_template | models[idx] | StrOutputParser()
+    )
+    chain_cluster_question = (
+            RunnablePassthrough.assign(
+                chat_history=RunnableLambda(memory.load_memory_variables) | itemgetter("chat_history")
+            )
+            | Templates.cluster_template | models[idx] | StrOutputParser()
+    )
+    return chain_question_refine, chain_answer_question, chain_cluster_question
+</file>
+
+<file path="CollegeChatBot/chatbot.py">
+from langchain.memory import ConversationBufferWindowMemory
+
+from chains_and_prompts import get_chains
+from utils import *
+from langchain_core.runnables import RunnableLambda, RunnableParallel
+from chains_and_prompts import Templates
+import asyncio
+
+api_len = 10
+
+
+async def get_answer(question, models, faiss_indexes , memory):
+    idx = 0
+
+    try:
+        idx += 1
+        idx %= api_len
+
+        _, answer_chain, cluster = get_chains(models, idx, memory)
+        output = await cluster.ainvoke({"question": question})
+        output = parse_list(output)
+        print(output)
+        db_names = ["abstracts", "emails", "finals", "rules"]
+        retrieved_docs = []
+        retrieved_tasks = []
+        for i, counter in enumerate(output):
+            if counter > 0:
+                faiss_index = faiss_indexes.get(db_names[i])
+
+                if faiss_index:
+                    dynamic_retriever = faiss_index.as_retriever(search_kwargs={"k": counter})
+                    retrieved_tasks.append(dynamic_retriever.ainvoke(question))
+                else:
+                    print(f"  Warning: FAISS index for '{db_names[i]}' not found in global 'faiss_indexes'.")
+
+        retrieved_docs_list = await asyncio.gather(*retrieved_tasks)
+        for docs_from_db in retrieved_docs_list:
+            for doc in docs_from_db:
+                retrieved_docs.append(doc.page_content)
+        context = "\n\n".join(retrieved_docs)
+        try:
+            idx += 1
+            idx %= len(models)
+            answer = await answer_chain.ainvoke({"question": question, "context": context})
+            return answer
+        except Exception as e:
+            print(f"Error during final answer generation (LLM index {idx}): {e}")
+            # Try next LLM or return an error message
+            return "I apologize, but I encountered an error while generating the answer. Please try again later."
+
+
+
+
+    except Exception as e:
+        print(f"Error at index {idx}: {e}")
 </file>
 
 </files>
