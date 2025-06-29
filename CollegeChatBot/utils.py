@@ -13,7 +13,9 @@ def upload_chunks(data_path):
             if row and row[0]:
                 chunks.append(row[0])
     return chunks
-def parse_list(response) :
+
+
+def parse_list(response):
     response = response.strip()
     if response.startswith("```python"):
         response = response.replace("```python", "")
@@ -21,19 +23,19 @@ def parse_list(response) :
         response = response.replace("```", "")
     response = response.strip('\n')
     try:
-      jsonList  = json.loads(response)
-      if isinstance(jsonList, list) and len(jsonList) == 4 and all(isinstance(x, int) for x in jsonList):
+        jsonList = json.loads(response)
+        if isinstance(jsonList, list) and len(jsonList) == 5 and all(isinstance(x, int) for x in jsonList):
             return jsonList
-      else :
-          raise Exception(f"Invalid response from API: {response}")
+        else:
+            raise Exception(f"Invalid response from API: {response}")
 
 
     except json.JSONDecodeError as e:
         parse_error_message = f"JSON decoding error: {e}. Output was not valid JSON. and the output was {response}"
         print(parse_error_message)
-        return [0,2,2,2]
+        return [0, 2, 2, 2, 0]
 
     except Exception as e:
         parse_error_message = f"An unexpected error occurred during parsing: {e} and the output was {response}"
         print(parse_error_message)
-        return [0,2,2,2]
+        return [0, 2, 2, 2, 0]

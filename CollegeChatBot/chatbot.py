@@ -3,13 +3,13 @@ from langchain.memory import ConversationBufferWindowMemory
 from chains_and_prompts import get_chains
 from utils import *
 from langchain_core.runnables import RunnableLambda, RunnableParallel
-from chains_and_prompts import Templates
+from chains_and_prompts import Templates, SCHEDULE_INFO
 import asyncio
 
 api_len = 10
 
 
-async def get_answer(question, models, faiss_indexes , memory):
+async def get_answer(question, models, faiss_indexes, memory):
     idx = 0
 
     try:
@@ -24,6 +24,9 @@ async def get_answer(question, models, faiss_indexes , memory):
         retrieved_docs = []
         retrieved_tasks = []
         for i, counter in enumerate(output):
+            if i == 4 and counter > 0:
+                retrieved_docs.append(SCHEDULE_INFO)
+                continue
             if counter > 0:
                 faiss_index = faiss_indexes.get(db_names[i])
 

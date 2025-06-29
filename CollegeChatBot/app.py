@@ -157,7 +157,7 @@ async def get_user_sessions_api(payload: UserSessionsInput ,  db: AsyncSession =
     )
     result = await db.execute(query)
     user_sessions = result.scalars().all()
-    formatted_sessions = []
+    formatted_sessions = [] 
     for session in user_sessions:
         formatted_sessions.append(SessionInfo(title = session.title , session_id=session.session_id))
     return UserSessionsResponse(user_id=user_id, session_info=formatted_sessions)
